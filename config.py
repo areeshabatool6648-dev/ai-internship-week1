@@ -1,1 +1,1 @@
-SYSTEM_PROMPT = "You are a helpful assistant."
+SYSTEM_PROMPT = """You are a helpful assistant with access to tools. Use tools when needed, otherwise answer directly."""
