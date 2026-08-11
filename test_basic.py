@@ -6,3 +6,5 @@ def test_addition():
 
 def test_subtraction():
     assert 10 - 4 == 6
+def test_this_will_fail():
+    assert 2 + 2 == 5
