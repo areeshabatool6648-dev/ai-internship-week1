@@ -1,7 +1,41 @@
 import os
 import csv
-import sqlite3
 import chromadb
+import sqlite3
+import json
+
+def init_db():
+    conn = sqlite3.connect("capstone.db")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS saved_analyses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            question TEXT,
+            answer TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_analysis(session_id, question, answer):
+    conn = sqlite3.connect("capstone.db")
+    conn.execute(
+        "INSERT INTO saved_analyses (session_id, question, answer) VALUES (?, ?, ?)",
+        (session_id, question, answer)
+    )
+    conn.commit()
+    conn.close()
+
+def list_saved_analyses(session_id):
+    conn = sqlite3.connect("capstone.db")
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, question, answer, created_at FROM saved_analyses WHERE session_id = ?",
+        (session_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 from dotenv import load_dotenv
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
@@ -16,6 +50,7 @@ collection = chroma_client.create_collection(name="feedback_intelligence")
 
 
 def load_feedback_csv(path="feedback_data.csv"):
+    """CSV se feedback rows padhta hai."""
     rows = []
     with open(path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -25,11 +60,13 @@ def load_feedback_csv(path="feedback_data.csv"):
 
 
 def load_product_info(path="product_info.txt"):
+    """Product background info padhta hai (RAG ke liye extra context)."""
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 
 def build_index():
+    """Sab feedback + product info ko embed karke Chroma mein store karta hai."""
     feedback_rows = load_feedback_csv()
     product_text = load_product_info()
 
@@ -37,11 +74,13 @@ def build_index():
     ids = []
     metadatas = []
 
+    # Har feedback comment ko ek document banate hain
     for row in feedback_rows:
         documents.append(row["comment"])
         ids.append(row["feedback_id"])
         metadatas.append({"segment": row["segment"], "type": "feedback"})
 
+    # Product info ko bhi ek document ki tarah add karte hain
     documents.append(product_text)
     ids.append("product_info")
     metadatas.append({"segment": "all", "type": "product_info"})
@@ -54,6 +93,7 @@ def build_index():
 
 
 def retrieve(query, k=5):
+    """Query se sabse relevant feedback/docs dhoondta hai."""
     query_embedding = embed_model.encode([query]).tolist()
     results = collection.query(query_embeddings=query_embedding, n_results=k)
 
@@ -61,9 +101,8 @@ def retrieve(query, k=5):
     for doc, meta, doc_id in zip(results['documents'][0], results['metadatas'][0], results['ids'][0]):
         retrieved.append({"id": doc_id, "text": doc, "segment": meta.get("segment"), "type": meta.get("type")})
     return retrieved
-
-
 def rewrite_query(chat_history, new_question):
+    """Vague follow-up ko standalone sawal banata hai."""
     if not chat_history:
         return new_question
     recent = chat_history[-4:]
@@ -82,13 +121,9 @@ Standalone question:"""
     )
     return response.choices[0].message.content.strip()
 
-
-def ask_feedback_question(question, chat_history=None):
-    if chat_history is None:
-        chat_history = []
-
-    standalone_question = rewrite_query(chat_history, question)
-    retrieved_items = retrieve(standalone_question, k=5)
+def ask_feedback_question(question):
+    """RAG: retrieve karo, phir model se jawab lo."""
+    retrieved_items = retrieve(question, k=5)
     context = "\n".join([f"[{item['id']}] ({item['segment']}): {item['text']}" for item in retrieved_items])
 
     prompt = f"""You are a customer feedback analyst. Answer the question using ONLY the feedback and product info below.
@@ -105,43 +140,7 @@ Answer:"""
         messages=[{"role": "user", "content": prompt}],
         timeout=15
     )
-    return response.choices[0].message.content, standalone_question
-
-
-def init_db():
-    conn = sqlite3.connect("capstone.db")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS saved_analyses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            question TEXT,
-            answer TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-def save_analysis(session_id, question, answer):
-    conn = sqlite3.connect("capstone.db")
-    conn.execute(
-        "INSERT INTO saved_analyses (session_id, question, answer) VALUES (?, ?, ?)",
-        (session_id, question, answer)
-    )
-    conn.commit()
-    conn.close()
-
-
-def list_saved_analyses(session_id):
-    conn = sqlite3.connect("capstone.db")
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT id, question, answer, created_at FROM saved_analyses WHERE session_id = ?",
-        (session_id,)
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    return response.choices[0].message.content
 
 
 if __name__ == "__main__":
@@ -162,7 +161,3 @@ if __name__ == "__main__":
     answer2, rewritten = ask_feedback_question(q2, history)
     print(f"[Rewritten: {rewritten}]")
     print(answer2)
-
-    save_analysis("test_session", q1, answer1)
-    print("\n=== Saved Analyses ===")
-    print(list_saved_analyses("test_session"))
