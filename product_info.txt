@@ -1,0 +1,11 @@
+DeskNest is a small business invoicing and accounting platform. It offers invoicing, expense tracking, and integrations with QuickBooks and other accounting tools.
+
+DeskNest has three customer segments: freelancers (individual users), small businesses (teams of 2-50 people), and enterprise (teams of 200+ people).
+
+Common features requested by freelancers include a mobile app for sending invoices on the go, and lower pricing tiers for individual users.
+
+Small business customers frequently report issues with QuickBooks integration reliability and slow customer support response times, sometimes exceeding 48 hours.
+
+Enterprise customers need role-based permissions, single sign-on (SSO) support, and higher API rate limits for automated workflows. Onboarding documentation for new team members is currently limited.
+
+The support team aims to respond to all tickets within 24 hours, though this target is not always met during high-volume periods.
