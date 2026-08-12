@@ -1,41 +1,8 @@
 import os
 import csv
-import chromadb
 import sqlite3
-import json
-
-def init_db():
-    conn = sqlite3.connect("capstone.db")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS saved_analyses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            question TEXT,
-            answer TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def save_analysis(session_id, question, answer):
-    conn = sqlite3.connect("capstone.db")
-    conn.execute(
-        "INSERT INTO saved_analyses (session_id, question, answer) VALUES (?, ?, ?)",
-        (session_id, question, answer)
-    )
-    conn.commit()
-    conn.close()
-
-def list_saved_analyses(session_id):
-    conn = sqlite3.connect("capstone.db")
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT id, question, answer, created_at FROM saved_analyses WHERE session_id = ?",
-        (session_id,)
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+import chromadb
+from pypdf import PdfReader
 from dotenv import load_dotenv
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
@@ -46,11 +13,11 @@ embed_model = SentenceTransformer('all-MiniLM-L6-v2')
 chat_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY"))
 
 chroma_client = chromadb.Client()
-collection = chroma_client.create_collection(name="feedback_intelligence")
+feedback_collection = chroma_client.create_collection(name="feedback")
+docs_collection = chroma_client.create_collection(name="product_docs")
 
 
-def load_feedback_csv(path="feedback_data.csv"):
-    """CSV se feedback rows padhta hai."""
+def load_feedback_csv(path="customer_feedback/desknest_customer_feedback.csv"):
     rows = []
     with open(path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -59,105 +26,99 @@ def load_feedback_csv(path="feedback_data.csv"):
     return rows
 
 
-def load_product_info(path="product_info.txt"):
-    """Product background info padhta hai (RAG ke liye extra context)."""
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+def chunk_text(text, chunk_size=150, overlap=30):
+    words = text.split()
+    chunks = []
+    start = 0
+    while start < len(words):
+        chunks.append(" ".join(words[start:start + chunk_size]))
+        start += chunk_size - overlap
+    return chunks
 
 
-def build_index():
-    """Sab feedback + product info ko embed karke Chroma mein store karta hai."""
-    feedback_rows = load_feedback_csv()
-    product_text = load_product_info()
-
-    documents = []
-    ids = []
-    metadatas = []
-
-    # Har feedback comment ko ek document banate hain
-    for row in feedback_rows:
-        documents.append(row["comment"])
-        ids.append(row["feedback_id"])
-        metadatas.append({"segment": row["segment"], "type": "feedback"})
-
-    # Product info ko bhi ek document ki tarah add karte hain
-    documents.append(product_text)
-    ids.append("product_info")
-    metadatas.append({"segment": "all", "type": "product_info"})
-
-    embeddings = embed_model.encode(documents).tolist()
-    collection.add(documents=documents, embeddings=embeddings, ids=ids, metadatas=metadatas)
-
-    print(f"Indexed {len(feedback_rows)} feedback comments + 1 product info doc.")
-    return feedback_rows
+def load_product_docs(folder="product_docs"):
+    """Saari PDFs padhta hai aur chunks mein todta hai."""
+    all_chunks = []
+    for filename in os.listdir(folder):
+        if filename.endswith(".pdf"):
+            path = os.path.join(folder, filename)
+            reader = PdfReader(path)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+            chunks = chunk_text(text)
+            for i, chunk in enumerate(chunks):
+                all_chunks.append({"source": filename, "chunk_id": f"{filename}_{i}", "text": chunk})
+    return all_chunks
 
 
-def retrieve(query, k=5):
-    """Query se sabse relevant feedback/docs dhoondta hai."""
+def build_feedback_index(rows):
+    """Feedback rows ko embed karke store karta hai."""
+    documents = [row["feedback"] for row in rows]
+    ids = [row["feedback_id"] for row in rows]
+    metadatas = [
+        {
+            "segment": row["segment"],
+            "product_area": row["product_area"],
+            "channel": row["channel"],
+            "rating": row["rating"],
+            "region": row["region"],
+        }
+        for row in rows
+    ]
+
+    # Batch mein embed karte hain (2000 rows ek sath bhi ho sakta hai, MiniLM fast hai)
+    embeddings = embed_model.encode(documents, show_progress_bar=True).tolist()
+    feedback_collection.add(documents=documents, embeddings=embeddings, ids=ids, metadatas=metadatas)
+    print(f"Indexed {len(rows)} feedback rows.")
+
+
+def build_docs_index():
+    """Product doc PDFs ko embed karke store karta hai."""
+    chunks = load_product_docs()
+    documents = [c["text"] for c in chunks]
+    ids = [c["chunk_id"] for c in chunks]
+    metadatas = [{"source": c["source"]} for c in chunks]
+
+    embeddings = embed_model.encode(documents, show_progress_bar=True).tolist()
+    docs_collection.add(documents=documents, embeddings=embeddings, ids=ids, metadatas=metadatas)
+    print(f"Indexed {len(chunks)} product doc chunks.")
+
+
+def retrieve_feedback(query, k=8, segment_filter=None):
     query_embedding = embed_model.encode([query]).tolist()
-    results = collection.query(query_embeddings=query_embedding, n_results=k)
+    where_clause = {"segment": segment_filter} if segment_filter else None
+    results = feedback_collection.query(query_embeddings=query_embedding, n_results=k, where=where_clause)
 
     retrieved = []
     for doc, meta, doc_id in zip(results['documents'][0], results['metadatas'][0], results['ids'][0]):
-        retrieved.append({"id": doc_id, "text": doc, "segment": meta.get("segment"), "type": meta.get("type")})
+        retrieved.append({"id": doc_id, "text": doc, **meta})
     return retrieved
-def rewrite_query(chat_history, new_question):
-    """Vague follow-up ko standalone sawal banata hai."""
-    if not chat_history:
-        return new_question
-    recent = chat_history[-4:]
-    context_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent])
-    prompt = f"""Given this recent conversation:
-{context_text}
 
-Rewrite the following follow-up into a standalone question. If already standalone, return unchanged. Only output the rewritten question.
 
-Follow-up: {new_question}
-Standalone question:"""
-    response = chat_client.chat.completions.create(
-        model="openrouter/free",
-        messages=[{"role": "user", "content": prompt}],
-        timeout=15
-    )
-    return response.choices[0].message.content.strip()
+def retrieve_docs(query, k=3):
+    query_embedding = embed_model.encode([query]).tolist()
+    results = docs_collection.query(query_embeddings=query_embedding, n_results=k)
 
-def ask_feedback_question(question):
-    """RAG: retrieve karo, phir model se jawab lo."""
-    retrieved_items = retrieve(question, k=5)
-    context = "\n".join([f"[{item['id']}] ({item['segment']}): {item['text']}" for item in retrieved_items])
-
-    prompt = f"""You are a customer feedback analyst. Answer the question using ONLY the feedback and product info below.
-Mention which feedback IDs support your answer.
-
-Context:
-{context}
-
-Question: {question}
-Answer:"""
-
-    response = chat_client.chat.completions.create(
-        model="openrouter/free",
-        messages=[{"role": "user", "content": prompt}],
-        timeout=15
-    )
-    return response.choices[0].message.content
+    retrieved = []
+    for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
+        retrieved.append({"source": meta.get("source"), "text": doc})
+    return retrieved
 
 
 if __name__ == "__main__":
-    init_db()
-    build_index()
+    rows = load_feedback_csv()
+    print(f"Loaded {len(rows)} feedback rows from CSV.")
 
-    history = []
+    build_feedback_index(rows)
+    build_docs_index()
 
-    print("\n=== Turn 1 ===")
-    q1 = "What are the biggest problems for small business customers?"
-    answer1, _ = ask_feedback_question(q1, history)
-    print(answer1)
-    history.append({"role": "user", "content": q1})
-    history.append({"role": "assistant", "content": answer1})
+    print("\n=== Test: Retrieve feedback about billing ===")
+    results = retrieve_feedback("billing problems", k=5)
+    for r in results:
+        print(f"[{r['id']}] ({r['segment']}, {r['product_area']}): {r['text'][:80]}...")
 
-    print("\n=== Turn 2 (vague follow-up) ===")
-    q2 = "What about freelancers?"
-    answer2, rewritten = ask_feedback_question(q2, history)
-    print(f"[Rewritten: {rewritten}]")
-    print(answer2)
+    print("\n=== Test: Retrieve product docs about refunds ===")
+    doc_results = retrieve_docs("refund policy", k=2)
+    for d in doc_results:
+        print(f"[{d['source']}]: {d['text'][:150]}...")
