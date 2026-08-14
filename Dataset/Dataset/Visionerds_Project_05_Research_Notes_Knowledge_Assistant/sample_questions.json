@@ -1,0 +1,30 @@
+[
+  {
+    "session_id": "research-001",
+    "message": "What is the difference between embeddings and a vector database?"
+  },
+  {
+    "session_id": "research-002",
+    "message": "Why can a larger top-k make retrieval worse?"
+  },
+  {
+    "session_id": "research-003",
+    "message": "How is conversation memory different from RAG?"
+  },
+  {
+    "session_id": "research-004",
+    "message": "What should happen if the notes don't support the answer?"
+  },
+  {
+    "session_id": "research-005",
+    "message": "Why should tool arguments be validated?"
+  },
+  {
+    "session_id": "research-006",
+    "message": "How should I store chat sessions in SQLite?"
+  },
+  {
+    "session_id": "research-007",
+    "message": "How do Kubernetes admission controllers work?"
+  }
+]
