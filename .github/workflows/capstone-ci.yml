@@ -18,4 +18,6 @@ jobs:
           pip install pytest sentence-transformers chromadb pypdf python-dotenv openai fastapi pydantic
 
       - name: Run tests
+        env:
+          OPENROUTER_API_KEY: dummy-key-for-ci
         run: pytest test_capstone.py -v
